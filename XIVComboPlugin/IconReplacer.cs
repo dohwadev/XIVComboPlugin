@@ -8,6 +8,7 @@ using Dalamud.Game.ClientState.JobGauge.Enums;
 using Dalamud.Game.ClientState.JobGauge.Types;
 using Dalamud.Logging;
 using Dalamud.Data;
+using FFXIVClientStructs.FFXIV.Client.Game;
 
 namespace XIVComboPlugin
 {
@@ -21,12 +22,12 @@ namespace XIVComboPlugin
         private readonly Hook<OnCheckIsIconReplaceableDelegate> checkerHook;
         private readonly ClientState clientState;
 
-        private readonly IntPtr comboTimer;
+        private IntPtr comboTimer = IntPtr.Zero;
+        private IntPtr lastComboMove = IntPtr.Zero;
 
         private readonly XIVComboConfiguration Configuration;
 
         private readonly Hook<OnGetIconDelegate> iconHook;
-        private readonly IntPtr lastComboMove;
 
         private unsafe delegate int* getArray(long* address);
 
@@ -39,8 +40,10 @@ namespace XIVComboPlugin
             Address = new IconReplacerAddressResolver();
             Address.Setup(scanner);
 
-            comboTimer = Address.ComboTimer;
-            lastComboMove = comboTimer + 0x4;
+            if (!clientState.IsLoggedIn)
+                clientState.Login += SetupComboData;
+            else
+                SetupComboData(null, null);
 
             PluginLog.Verbose("===== X I V C O M B O =====");
             PluginLog.Verbose("IsIconReplaceable address {IsIconReplaceable}", Address.IsIconReplaceable);
@@ -50,6 +53,13 @@ namespace XIVComboPlugin
 
             iconHook = Hook<OnGetIconDelegate>.FromAddress(Address.GetIcon, GetIconDetour);
             checkerHook = Hook<OnCheckIsIconReplaceableDelegate>.FromAddress(Address.IsIconReplaceable, CheckIsIconReplaceableDetour);
+        }
+
+        public unsafe void SetupComboData(object sender, EventArgs args)
+        {
+            var actionmanager = (byte*)ActionManager.Instance();
+            comboTimer = (IntPtr)(actionmanager + 0x60);
+            lastComboMove = comboTimer + 0x4;
         }
 
         public void Enable()
@@ -84,6 +94,17 @@ namespace XIVComboPlugin
         private ulong GetIconDetour(byte self, uint actionID)
         {
             if (clientState.LocalPlayer == null) return iconHook.Original(self, actionID);
+            // Last resort. For some reason GetIcon fires after leaving the lobby but before ClientState.Login
+            if (lastComboMove == IntPtr.Zero)
+            {
+                SetupComboData(null, null);
+                return iconHook.Original(self, actionID);
+            }
+            if (comboTimer == IntPtr.Zero)
+            {
+                SetupComboData(null, null);
+                return iconHook.Original(self, actionID);
+            }
 
             var lastMove = Marshal.ReadInt32(lastComboMove);
             var comboTime = Marshal.PtrToStructure<float>(comboTimer);
@@ -197,21 +218,6 @@ namespace XIVComboPlugin
 
             // PALADIN
 
-            // Replace Goring Blade with Goring Blade combo
-            if (Configuration.ComboPresets.HasFlag(CustomComboPreset.PaladinGoringBladeCombo))
-                if (actionID == PLD.GoringBlade)
-                {
-                    if (comboTime > 0)
-                    {
-                        if (lastMove == PLD.FastBlade && level >= 4)
-                            return PLD.RiotBlade;
-                        if (lastMove == PLD.RiotBlade && level >= 54)
-                            return PLD.GoringBlade;
-                    }
-
-                    return PLD.FastBlade;
-                }
-
             // Replace Royal Authority with Royal Authority combo
             if (Configuration.ComboPresets.HasFlag(CustomComboPreset.PaladinRoyalAuthorityCombo))
                 if (actionID == PLD.RoyalAuthority || actionID == PLD.RageOfHalone)
@@ -248,17 +254,7 @@ namespace XIVComboPlugin
                 if (actionID == PLD.Requiescat)
                 {
                     if (SearchBuffArray(PLD.BuffRequiescat) && level >= 80)
-                        return PLD.Confiteor;
-
-                    if (SearchBuffArray(PLD.BuffBladeOfFaithReady))
-                        return PLD.BladeOfFaith;
-
-                    if (lastMove == PLD.BladeOfFaith)
-                        return PLD.BladeOfTruth;
-
-                    if (lastMove == PLD.BladeOfTruth)
-                        return PLD.BladeOfValor;
-
+                        return iconHook.Original(self, PLD.Confiteor);
                     return PLD.Requiescat;
                 }
 
